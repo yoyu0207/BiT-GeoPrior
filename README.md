@@ -32,7 +32,7 @@ Deep learning models for detecting Spartina alterniflora (cordgrass) expansion a
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/BiT-GeoPrior.git
+git clone https://github.com/yoyu0207/BiT-GeoPrior.git
 cd BiT-GeoPrior
 pip install -r requirements.txt
 ```
