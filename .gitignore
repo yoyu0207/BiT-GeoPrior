@@ -11,19 +11,14 @@ build/
 checkpoints/
 checkpoints_*/
 
-# Generated figures
+# Data & figures
+*.npz
+*.npy
 *.pdf
 *.png
 *.tif
 *.tiff
 *.svg
-
-# Data files
-*.npz
-*.npy
-
-# Jupyter
-.ipynb_checkpoints/
 
 # IDE
 .vscode/
@@ -33,16 +28,17 @@ checkpoints_*/
 .DS_Store
 Thumbs.db
 
-# Duplicate root-level scripts (use models/ versions instead)
+# Unrelated / duplicate / deployment scripts
 /SPGmodule.py
 /OSPGmodule.py
-
-# Unrelated scripts
 应该是没啥用的/
 edit_manuscript_docx.py
 insert_missing_sections.py
-
-# Deployment scripts with local paths
 run_deploy_with_preimport.py
 deploy_bit_online_fullarea.py
 infer_fullarea.py
+GWDA_patch.ipynb
+build_8ch_s2_stack.py
+run_train_all.bat
+visualize_bit.py
+viz_channel_weights.py

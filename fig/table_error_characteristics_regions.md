@@ -1,5 +1,0 @@
-| Region     | Pattern                            |   TP (ha) |   FP (ha) |   FN (ha) |   Precision (%) |   Recall (%) |   F1 (%) |   Commission error (%) |   Omission error (%) | Dominant characteristic   |
-|:-----------|:-----------------------------------|----------:|----------:|----------:|----------------:|-------------:|---------:|-----------------------:|---------------------:|:--------------------------|
-| Region I   | large irregular patch              |   3372.92 |    401.73 |     72.33 |           89.36 |        97.9  |    93.43 |                  10.64 |                 2.1  | FP-dominant               |
-| Region II  | linear tidal-flat edge             |    250.21 |     16.26 |     26.37 |           93.9  |        90.47 |    92.15 |                   6.1  |                 9.53 | FN-dominant               |
-| Region III | fragmented tidal-channel landscape |   1604.03 |    212.58 |    142.3  |           88.3  |        91.85 |    90.04 |                  11.7  |                 8.15 | FP-dominant               |
