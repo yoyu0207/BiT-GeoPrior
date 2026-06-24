@@ -20,6 +20,10 @@ checkpoints_*/
 *.tiff
 *.svg
 
+# Allow README assets
+!assets/
+!assets/**
+
 # IDE
 .vscode/
 .idea/
