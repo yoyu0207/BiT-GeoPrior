@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# Model checkpoints (large files)
+*.pth
+checkpoints/
+checkpoints_*/
+
+# Generated figures
+*.pdf
+*.png
+*.tif
+*.tiff
+*.svg
+
+# Data files
+*.npz
+*.npy
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Duplicate root-level scripts (use models/ versions instead)
+/SPGmodule.py
+/OSPGmodule.py
+
+# Unrelated scripts
+应该是没啥用的/
+edit_manuscript_docx.py
+insert_missing_sections.py
+
+# Deployment scripts with local paths
+run_deploy_with_preimport.py
+deploy_bit_online_fullarea.py
+infer_fullarea.py
