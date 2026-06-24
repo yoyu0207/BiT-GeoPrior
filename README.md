@@ -17,7 +17,7 @@ Accurate monitoring of *Spartina alterniflora* (cordgrass) dynamics in coastal w
 ## Architecture
 
 <div align="center">
-  <img src="assets/architecture.svg" alt="BiT-GeoPrior Architecture" width="90%">
+  <img src="assets/architecture.png" alt="BiT-GeoPrior Architecture" width="90%">
   <p><em>Overall architecture: Bi-temporal Transformer with Spatial Prior Gate injection.</em></p>
 </div>
 
