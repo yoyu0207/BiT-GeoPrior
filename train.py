@@ -40,9 +40,12 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import csv
 import json
+import random
+import shutil
 import time
 import argparse
 
+import numpy as np
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -87,6 +90,7 @@ def parse_args():
     parser.add_argument('--lr',         type=float, default=5e-5)
     parser.add_argument('--epochs',     type=int,   default=100)
     parser.add_argument('--batch_size', type=int,   default=8)
+    parser.add_argument('--seed',       type=int,   default=42)
     parser.add_argument('--data_root',  type=str,
                         default=r"D:/yoyu/SA_Identification/"
                                 r"dataset_patches_2020_2024")
@@ -105,7 +109,26 @@ def parse_args():
              "0.0 = 不使用蒸馏（默认）；建议从 0.1 开始试。"
              "需要同时指定 --prior_dir spatial_prior_gwda。"
     )
+    parser.add_argument(
+        '--split_manifest', type=str, default=None,
+        help="空间 train/val/test 划分清单。默认使用 data_root 下的 "
+             "spatial_split_manifest.csv。"
+    )
+    parser.add_argument(
+        '--allow_random_patch_split', action='store_true',
+        help="仅用于复现旧结果。允许使用存在空间泄漏风险的随机 patch 划分。"
+    )
     return parser.parse_args()
+
+
+def set_global_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -259,7 +282,17 @@ def get_gamma(model):
 # ──────────────────────────────────────────────────────────────────────
 def main():
     args   = parse_args()
+    set_global_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    manifest_path = args.split_manifest
+    if manifest_path is None and not args.allow_random_patch_split:
+        manifest_path = os.path.join(
+            args.data_root, 'spatial_split_manifest.csv')
+    elif manifest_path is not None and not os.path.isabs(manifest_path):
+        manifest_path = os.path.join(args.data_root, manifest_path)
+    if manifest_path is not None:
+        manifest_path = os.path.abspath(manifest_path)
 
     # checkpoint 文件夹命名
     # BiT_Online 时附加 prior_tag 以区分 GWR_Online / GWDA_Online
@@ -267,27 +300,48 @@ def main():
     timestamp = time.strftime("%m%d_%H%M")
     save_dir  = f"checkpoints_{args.model}{tag}_{timestamp}"
     os.makedirs(save_dir, exist_ok=True)
+    if manifest_path is not None and os.path.exists(manifest_path):
+        shutil.copy2(manifest_path, os.path.join(save_dir, 'split_manifest.csv'))
 
     print("=" * 60)
     print(f"  Model      : {args.model}{tag}")
     print(f"  Device     : {device}")
     print(f"  LR / Epochs: {args.lr:.1e}  /  {args.epochs}")
     print(f"  Batch size : {args.batch_size}")
+    print(f"  Seed       : {args.seed}")
+    print(f"  Split file : {manifest_path or 'legacy random patch split'}")
     print(f"  Save dir   : {save_dir}")
     print("=" * 60)
 
     # 数据集
     train_ds = CDDataset(args.data_root, split='train',
                          split_ratio=0.85, transform=True,
-                         prior_dir_name=args.prior_dir)
+                         prior_dir_name=args.prior_dir,
+                         manifest_path=manifest_path,
+                         allow_random_split=args.allow_random_patch_split)
     val_ds   = CDDataset(args.data_root, split='val',
                          split_ratio=0.85, transform=False,
-                         prior_dir_name=args.prior_dir)
+                         prior_dir_name=args.prior_dir,
+                         manifest_path=manifest_path,
+                         allow_random_split=args.allow_random_patch_split)
+    test_ds = None
+    if not args.allow_random_patch_split:
+        test_ds = CDDataset(args.data_root, split='test',
+                            transform=False,
+                            prior_dir_name=args.prior_dir,
+                            manifest_path=manifest_path)
+
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(args.seed)
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size,
-        shuffle=True, num_workers=0, pin_memory=True)
+        shuffle=True, num_workers=0, pin_memory=True,
+        generator=loader_generator)
     val_loader   = DataLoader(
         val_ds, batch_size=args.batch_size,
+        shuffle=False, num_workers=0, pin_memory=True)
+    test_loader = None if test_ds is None else DataLoader(
+        test_ds, batch_size=args.batch_size,
         shuffle=False, num_workers=0, pin_memory=True)
 
     # 构建模型 / 优化器 / 调度器
@@ -306,7 +360,7 @@ def main():
             'lr', 'gamma1', 'gamma2',
         ])
 
-    best_f1 = 0.0
+    best_val_f1 = -1.0
 
     for epoch in range(1, args.epochs + 1):
 
@@ -340,24 +394,48 @@ def main():
                 f"{gamma2:.6f}",
             ])
 
-        if metrics['F1'] > best_f1:
-            best_f1 = metrics['F1']
+        if metrics['F1'] > best_val_f1:
+            best_val_f1 = metrics['F1']
             torch.save(model.state_dict(),
                        os.path.join(save_dir, "best_model.pth"))
-            print(f"          ↑ best saved  (F1={best_f1:.4f})")
+            print(f"          ↑ best saved  (val F1={best_val_f1:.4f})")
 
         if epoch % 20 == 0:
             torch.save(model.state_dict(),
                        os.path.join(save_dir, f"epoch_{epoch}.pth"))
 
+    test_metrics = None
+    if test_loader is not None:
+        best_path = os.path.join(save_dir, "best_model.pth")
+        model.load_state_dict(torch.load(best_path, map_location=device))
+        test_metrics = validate(
+            model, args.model, test_loader, device, tracker)
+        with open(os.path.join(save_dir, 'test_metrics.json'), 'w') as f:
+            json.dump(test_metrics, f, indent=2)
+        print(
+            "  Independent test: "
+            f"F1={test_metrics['F1']:.4f}  "
+            f"IoU={test_metrics['IoU']:.4f}  "
+            f"P={test_metrics['Precision']:.4f}  "
+            f"R={test_metrics['Recall']:.4f}"
+        )
+
     # 训练结束汇总
     summary = {
         'model':      args.model + tag,
-        'best_f1':    round(best_f1, 6),
+        'best_val_f1': round(best_val_f1, 6),
+        'test_metrics': test_metrics,
         'epochs':     args.epochs,
         'lr':         args.lr,
         'batch_size': args.batch_size,
+        'seed':       args.seed,
         'data_root':  args.data_root,
+        'split_manifest': manifest_path,
+        'split_counts': {
+            'train': len(train_ds),
+            'val': len(val_ds),
+            'test': len(test_ds) if test_ds is not None else None,
+        },
         'prior_tag':  args.prior_tag,
         'alpha':      args.alpha,
     }
@@ -367,7 +445,7 @@ def main():
 
     print()
     print("=" * 60)
-    print(f"  Done : {args.model}{tag}  |  Best F1 = {best_f1:.4f}")
+    print(f"  Done : {args.model}{tag}  |  Best val F1 = {best_val_f1:.4f}")
     print(f"  CSV  : {log_path}")
     print(f"  JSON : {summary_path}")
     print("=" * 60)

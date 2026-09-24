@@ -21,6 +21,7 @@ dataset.py — Change Detection Dataset
 ======================================================================
 """
 
+import csv
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import torch
@@ -34,14 +35,20 @@ class CDDataset(Dataset):
 
     def __init__(self, root_dir: str, split: str = 'train',
                  split_ratio: float = 0.85, transform: bool = True,
-                 prior_dir_name: str = None):
+                 prior_dir_name: str = None, manifest_path: str = None,
+                 allow_random_split: bool = False):
         """
         Args:
             prior_dir_name: 先验文件夹名称，明确指定用哪个先验。
                             例如 'spatial_prior_gwr' 或 'spatial_prior_gwda'。
                             若为 None，则按优先级自动查找。
                             若文件夹不存在，返回全零占位（在线先验模式）。
+            manifest_path: 空间独立划分清单。CSV 至少包含 filename 和 split。
+            allow_random_split: 仅用于复现旧实验；不适合作为空间独立验证。
         """
+        if split not in {'train', 'val', 'test'}:
+            raise ValueError(f"split 必须是 train、val 或 test，收到：{split}")
+
         self.root_dir  = root_dir
         self.transform = transform
 
@@ -85,12 +92,31 @@ class CDDataset(Dataset):
             raise ValueError(
                 f"在 {self.label_dir} 下未找到 .npy 或 .png 文件")
 
-        # 训练 / 验证划分（固定随机种子保证可复现）
-        files = np.array(sorted(self.files))
-        np.random.default_rng(42).shuffle(files)
-        n_train = int(len(files) * split_ratio)
-        self.file_list = (files[:n_train] if split == 'train'
-                          else files[n_train:]).tolist()
+        if manifest_path is not None:
+            self.file_list = self._load_manifest(manifest_path, split)
+        elif allow_random_split:
+            if split == 'test':
+                raise ValueError("旧的随机切片方案没有独立 test 集")
+            print(
+                "[WARNING] 正在使用旧的随机 patch 划分。相邻重叠切片可能跨越 "
+                "train/val，仅可用于复现旧结果。"
+            )
+            files = np.array(sorted(self.files))
+            np.random.default_rng(42).shuffle(files)
+            n_train = int(len(files) * split_ratio)
+            self.file_list = (files[:n_train] if split == 'train'
+                              else files[n_train:]).tolist()
+        else:
+            raise ValueError(
+                "必须提供 manifest_path 以使用空间独立划分。若仅需复现旧实验，"
+                "请显式设置 allow_random_split=True。"
+            )
+
+        missing = [name for name in self.file_list
+                   if not os.path.exists(os.path.join(self.label_dir, name))]
+        if missing:
+            raise FileNotFoundError(
+                f"划分清单中的 {len(missing)} 个标签文件不存在，例如：{missing[:3]}")
 
         print(f"[{split.upper()}] 共 {len(self.file_list)} 个切片")
 
@@ -101,6 +127,34 @@ class CDDataset(Dataset):
             if os.path.exists(path):
                 return path
         return None
+
+    def _load_manifest(self, manifest_path: str, split: str) -> list:
+        if not os.path.isabs(manifest_path):
+            manifest_path = os.path.join(self.root_dir, manifest_path)
+        if not os.path.exists(manifest_path):
+            raise FileNotFoundError(f"找不到空间划分清单：{manifest_path}")
+
+        selected = []
+        seen = set()
+        with open(manifest_path, newline='', encoding='utf-8-sig') as handle:
+            reader = csv.DictReader(handle)
+            required = {'filename', 'split'}
+            if not required.issubset(reader.fieldnames or []):
+                raise ValueError(
+                    f"划分清单必须包含 {sorted(required)} 列，"
+                    f"实际列为：{reader.fieldnames}")
+            for row in reader:
+                filename = row['filename'].strip()
+                row_split = row['split'].strip().lower()
+                if filename in seen:
+                    raise ValueError(f"划分清单包含重复文件：{filename}")
+                seen.add(filename)
+                if row_split == split:
+                    selected.append(filename)
+
+        if not selected:
+            raise ValueError(f"划分清单中没有 split={split} 的样本")
+        return sorted(selected)
 
     # ── Dataset 接口 ──────────────────────────────────────────────────
     def __len__(self) -> int:

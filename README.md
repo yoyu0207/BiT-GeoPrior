@@ -104,10 +104,31 @@ data_root/
 ├── B/                     # T2 Sentinel-2 patches (.npy, [8, H, W])
 ├── label/                 # Binary change labels (.npy or .png)
 ├── spatial_prior_gwr/     # (optional) GWR prior patches [0, 1]
-└── spatial_prior_gwda/    # (optional) GWDA prior patches [0, 1]
+├── spatial_prior_gwda/    # (optional) GWDA prior patches [0, 1]
+└── spatial_split_manifest.csv
 ```
 
 8-channel composition: **B8, B4, B3, B2, NDVI, EVI, SAVI, GNDVI**
+
+### Spatially independent split
+
+Overlapping image patches must not be randomly divided between training and
+validation sets. Generate an explicit spatial manifest before training:
+
+```bash
+python make_spatial_split.py \
+  --data_root /path/to/data_root \
+  --block_size 2048 \
+  --patch_size 256 \
+  --buffer 256 \
+  --seed 42
+```
+
+For 10 m Sentinel-2 imagery, this configuration uses approximately 20.48 km
+spatial blocks and a 2.56 km exclusion buffer between train, validation, and
+test patches. Samples in the buffer are retained in the manifest as
+`excluded` for auditability. The validation set is used for checkpoint
+selection; the test set is evaluated only after training.
 
 ## Quick Start
 
@@ -127,10 +148,19 @@ python train.py --model BiT_GWDA --lr 6e-5 --epochs 200
 python train.py --model BiT_Online --lr 6e-5 --epochs 200
 ```
 
+Training uses `data_root/spatial_split_manifest.csv` by default. Set
+`--split_manifest` to use another manifest and `--seed` for repeated runs.
+The legacy random patch split is available only through the explicit
+`--allow_random_patch_split` flag and should not be used for independent
+spatial validation.
+
 ### Evaluation
 
 ```bash
-python evaluate.py --model BiT_GWR --pth checkpoints/BiT_GWR/best_model.pth
+python evaluate.py \
+  --model BiT_GWR \
+  --pth checkpoints/BiT_GWR/best_model.pth \
+  --split test
 ```
 
 ## Project Structure
@@ -150,9 +180,11 @@ python evaluate.py --model BiT_GWR --pth checkpoints/BiT_GWR/best_model.pth
 │   └── transformer_block.py       # Shared Transformer block
 ├── train.py                       # Training entry point
 ├── dataset.py                     # Data loader with augmentation
+├── make_spatial_split.py          # Leakage-safe spatial split generator
 ├── losses.py                      # BCE + Dice hybrid loss
 ├── utils.py                       # Metric tracker (IoU, F1, etc.)
 ├── evaluate.py                    # Standalone evaluation
+├── splits/                        # Versioned split manifests and summaries
 ├── assets/                        # README figures
 ├── requirements.txt
 ├── LICENSE
