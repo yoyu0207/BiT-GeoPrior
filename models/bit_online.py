@@ -31,8 +31,10 @@ from models.ecological_prior    import EcologicalPriorEncoder
 
 class BiT_Online(nn.Module):
 
-    def __init__(self, in_channels: int = 8, num_classes: int = 1):
+    def __init__(self, in_channels: int = 8, num_classes: int = 1,
+                 use_gating: bool = True):
         super().__init__()
+        self.use_gating = use_gating
 
         # ── Backbone ─────────────────────────────────────────────────
         base = resnet18(weights=None)
@@ -74,7 +76,7 @@ class BiT_Online(nn.Module):
         f = self.transformer(f)
         return f.transpose(1, 2).reshape(b, self.embed_dim, h, w)
 
-    def forward(self, x1, x2, spatial_prior=None):
+    def forward(self, x1, x2, spatial_prior=None, return_prior=False):
         """
         Args:
             x1 / x2:       双时相影像  [B, C, H, W]
@@ -82,6 +84,10 @@ class BiT_Online(nn.Module):
                            （dataset.py 返回全零占位，不影响推理）
         """
         prior = self.prior_encoder(x1)          # [B, 1, H, W]
-        f1    = self.spg1(self._encode(x1), prior)
-        f2    = self.spg2(self._encode(x2), prior)
-        return self.decoder(torch.cat([f1, f2], dim=1))
+        f1 = self._encode(x1)
+        f2 = self._encode(x2)
+        if self.use_gating:
+            f1 = self.spg1(f1, prior)
+            f2 = self.spg2(f2, prior)
+        logits = self.decoder(torch.cat([f1, f2], dim=1))
+        return (logits, prior) if return_prior else logits

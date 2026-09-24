@@ -22,6 +22,7 @@ dataset.py — Change Detection Dataset
 """
 
 import csv
+import hashlib
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import torch
@@ -36,7 +37,8 @@ class CDDataset(Dataset):
     def __init__(self, root_dir: str, split: str = 'train',
                  split_ratio: float = 0.85, transform: bool = True,
                  prior_dir_name: str = None, manifest_path: str = None,
-                 allow_random_split: bool = False):
+                 allow_random_split: bool = False,
+                 prior_control: str = 'none', control_seed: int = 42):
         """
         Args:
             prior_dir_name: 先验文件夹名称，明确指定用哪个先验。
@@ -51,6 +53,10 @@ class CDDataset(Dataset):
 
         self.root_dir  = root_dir
         self.transform = transform
+        if prior_control not in {'none', 'shuffled', 'random'}:
+            raise ValueError("prior_control 必须是 none、shuffled 或 random")
+        self.prior_control = prior_control
+        self.control_seed = control_seed
 
         # 标签文件夹（必须存在）
         self.label_dir = self._find_dir(self._LABEL_DIRS)
@@ -118,7 +124,22 @@ class CDDataset(Dataset):
             raise FileNotFoundError(
                 f"划分清单中的 {len(missing)} 个标签文件不存在，例如：{missing[:3]}")
 
-        print(f"[{split.upper()}] 共 {len(self.file_list)} 个切片")
+        self.prior_name_map = {name: name for name in self.file_list}
+        if self.prior_control == 'shuffled':
+            rng = np.random.default_rng(control_seed)
+            shuffled = np.asarray(self.file_list, dtype=object).copy()
+            if len(shuffled) > 1:
+                for _ in range(100):
+                    rng.shuffle(shuffled)
+                    if all(left != right for left, right in
+                           zip(self.file_list, shuffled)):
+                        break
+                else:
+                    shuffled = np.roll(np.asarray(self.file_list, dtype=object), 1)
+            self.prior_name_map = dict(zip(self.file_list, shuffled.tolist()))
+
+        print(f"[{split.upper()}] 共 {len(self.file_list)} 个切片；"
+              f"prior_control={self.prior_control}")
 
     # ── 工具 ──────────────────────────────────────────────────────────
     def _find_dir(self, candidates: list):
@@ -181,8 +202,18 @@ class CDDataset(Dataset):
         ).astype(np.float32)[:8]
 
         # 先验图（文件夹或文件不存在时返回全零）
-        if self.prior_dir is not None:
-            prior_path = os.path.join(self.prior_dir, npy_fname)
+        if self.prior_control == 'random':
+            digest = hashlib.blake2b(
+                f"{self.control_seed}:{fname}".encode('utf-8'),
+                digest_size=8).digest()
+            sample_seed = int.from_bytes(digest, 'little')
+            prior = np.random.default_rng(sample_seed).random(
+                label.shape[-2:], dtype=np.float32)
+        elif self.prior_dir is not None:
+            prior_name = self.prior_name_map[fname]
+            prior_name = (prior_name if self.is_npy
+                          else prior_name.replace('.png', '.npy'))
+            prior_path = os.path.join(self.prior_dir, prior_name)
             prior = (np.load(prior_path).astype(np.float32)
                      if os.path.exists(prior_path)
                      else np.zeros(label.shape[-2:], dtype=np.float32))

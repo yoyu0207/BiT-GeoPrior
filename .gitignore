@@ -10,6 +10,9 @@ build/
 *.pth
 checkpoints/
 checkpoints_*/
+/revision_experiments_gwda/
+/smoke_matrix/
+/smoke_runs/
 
 # Data & figures
 *.npz

@@ -130,6 +130,43 @@ test patches. Samples in the buffer are retained in the manifest as
 `excluded` for auditability. The validation set is used for checkpoint
 selection; the test set is evaluated only after training.
 
+### Leakage-safe GWDA teacher
+
+The revised GWDA workflow fits the teacher exclusively with samples from the
+training spatial blocks. Validation and test labels are not used for feature
+standardisation, adaptive-bandwidth selection, model fitting, or probability
+calibration:
+
+```bash
+python build_gwda_prior.py \
+  --data_root /path/to/data_root \
+  --output_dir /path/to/data_root/spatial_prior_gwda_train_only
+```
+
+The command records the fitting sample provenance, spatial-block
+cross-validation results, selected adaptive Gaussian bandwidth, isotonic
+calibration parameters, and teacher-only diagnostics in
+`gwda_metadata.json`. The new revision experiments do not use GWR priors.
+
+### Multi-seed revision experiments
+
+Run the complete five-seed baseline and control matrix with:
+
+```bash
+python run_revision_experiments.py \
+  --python /path/to/python \
+  --data_root /path/to/data_root \
+  --epochs 200 \
+  --patience 30
+```
+
+The matrix includes FC-SiamDiff, SNUNet, ChangeFormer, BiT, train-only
+BiT-GWDA, OEP-BiT, COAST, shuffled-prior, random-prior, no-gating, and
+distillation-weight sensitivity controls. It writes per-run metadata,
+mean/standard deviation summaries, paired bootstrap confidence intervals,
+paired t-tests, and Wilcoxon tests. Distillation-weight sensitivity runs use
+the validation set only and do not access the test set.
+
 ## Quick Start
 
 ### Training

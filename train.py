@@ -91,6 +91,17 @@ def parse_args():
     parser.add_argument('--epochs',     type=int,   default=100)
     parser.add_argument('--batch_size', type=int,   default=8)
     parser.add_argument('--seed',       type=int,   default=42)
+    parser.add_argument('--num_workers', type=int, default=0)
+    parser.add_argument('--patience', type=int, default=30,
+                        help="验证 F1 连续多少轮不提升后提前停止；0 表示禁用。")
+    parser.add_argument('--amp', action='store_true',
+                        help="在 CUDA 上启用自动混合精度。")
+    parser.add_argument('--output_root', type=str, default='experiments')
+    parser.add_argument('--run_name', type=str, default=None)
+    parser.add_argument('--save_every', type=int, default=0,
+                        help="每隔多少轮保存中间权重；0 表示只保留最佳权重。")
+    parser.add_argument('--skip_test', action='store_true',
+                        help="仅用于验证集超参数敏感性分析，不读取测试集。")
     parser.add_argument('--data_root',  type=str,
                         default=r"D:/yoyu/SA_Identification/"
                                 r"dataset_patches_2020_2024")
@@ -109,6 +120,10 @@ def parse_args():
              "0.0 = 不使用蒸馏（默认）；建议从 0.1 开始试。"
              "需要同时指定 --prior_dir spatial_prior_gwda。"
     )
+    parser.add_argument('--prior_control', choices=['none', 'shuffled', 'random'],
+                        default='none')
+    parser.add_argument('--no_gating', action='store_true',
+                        help="在线先验仍接受 GWDA 软监督，但不注入变化检测特征。")
     parser.add_argument(
         '--split_manifest', type=str, default=None,
         help="空间 train/val/test 划分清单。默认使用 data_root 下的 "
@@ -134,7 +149,7 @@ def set_global_seed(seed: int) -> None:
 # ──────────────────────────────────────────────────────────────────────
 #  模型工厂
 # ──────────────────────────────────────────────────────────────────────
-def build_model(name: str, device) -> torch.nn.Module:
+def build_model(name: str, device, online_use_gating: bool = True) -> torch.nn.Module:
     kw = dict(in_channels=8, num_classes=1)
     mapping = {
         'SNUNet':          lambda: SNUNet(**kw),
@@ -145,7 +160,8 @@ def build_model(name: str, device) -> torch.nn.Module:
         'ChangeFormer':    lambda: ChangeFormer(**kw),
         'BiT_GWR':         lambda: BiT_GWR(**kw),
         'BiT_GWDA':        lambda: BiT_GWDA(**kw),
-        'BiT_Online':      lambda: BiT_Online(**kw),
+        'BiT_Online':      lambda: BiT_Online(
+                               **kw, use_gating=online_use_gating),
     }
     return mapping[name]().to(device)
 
@@ -208,7 +224,7 @@ def build_scheduler(optimizer, name: str, epochs: int):
 #  单 epoch 训练 / 验证
 # ──────────────────────────────────────────────────────────────────────
 def train_one_epoch(model, name, loader, criterion, optimizer, device,
-                    alpha: float = 0.0):
+                    alpha: float = 0.0, scaler=None, amp: bool = False):
     """
     alpha > 0 且模型为 BiT_Online 时，启用 GWDA 知识蒸馏：
       L_total = L_cd + alpha * L_distill
@@ -226,23 +242,29 @@ def train_one_epoch(model, name, loader, criterion, optimizer, device,
         label = label.to(device)
         prior = prior.to(device)
 
-        optimizer.zero_grad()
-        out  = model(imgA, imgB, prior) if name in PRIOR_MODELS \
-               else model(imgA, imgB)
-        loss = sum(criterion(o, label) for o in out) \
-               if isinstance(out, list) else criterion(out, label)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast('cuda', enabled=amp):
+            if name == 'BiT_Online' and use_distil:
+                out, prior_online = model(
+                    imgA, imgB, prior, return_prior=True)
+            else:
+                out = (model(imgA, imgB, prior) if name in PRIOR_MODELS
+                       else model(imgA, imgB))
+                prior_online = None
+            loss = (sum(criterion(o, label) for o in out)
+                    if isinstance(out, list) else criterion(out, label))
+            if use_distil:
+                loss_distil = torch.nn.functional.mse_loss(
+                    prior_online, prior)
+                loss = loss + alpha * loss_distil
 
-        # ── GWDA 知识蒸馏损失 ─────────────────────────────────────────
-        if use_distil:
-            # prior_encoder 的输出就是在线先验图
-            prior_online = model.prior_encoder(imgA)    # [B, 1, H, W]
-            # prior 是 dataset 读进来的 GWDA 先验图，作为蒸馏目标
-            loss_distil  = torch.nn.functional.mse_loss(
-                prior_online, prior)
-            loss = loss + alpha * loss_distil
-
-        loss.backward()
-        optimizer.step()
+        if scaler is not None and scaler.is_enabled():
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         total += loss.item()
         bar.set_postfix(loss=f"{loss.item():.4f}")
@@ -297,8 +319,9 @@ def main():
     # checkpoint 文件夹命名
     # BiT_Online 时附加 prior_tag 以区分 GWR_Online / GWDA_Online
     tag       = f"_{args.prior_tag}" if args.prior_tag else ""
-    timestamp = time.strftime("%m%d_%H%M")
-    save_dir  = f"checkpoints_{args.model}{tag}_{timestamp}"
+    timestamp = time.strftime("%m%d_%H%M%S")
+    run_name = args.run_name or f"{args.model}{tag}_{timestamp}"
+    save_dir = os.path.join(args.output_root, run_name)
     os.makedirs(save_dir, exist_ok=True)
     if manifest_path is not None and os.path.exists(manifest_path):
         shutil.copy2(manifest_path, os.path.join(save_dir, 'split_manifest.csv'))
@@ -309,6 +332,8 @@ def main():
     print(f"  LR / Epochs: {args.lr:.1e}  /  {args.epochs}")
     print(f"  Batch size : {args.batch_size}")
     print(f"  Seed       : {args.seed}")
+    print(f"  Prior ctrl : {args.prior_control}")
+    print(f"  Gating     : {not args.no_gating}")
     print(f"  Split file : {manifest_path or 'legacy random patch split'}")
     print(f"  Save dir   : {save_dir}")
     print("=" * 60)
@@ -318,38 +343,47 @@ def main():
                          split_ratio=0.85, transform=True,
                          prior_dir_name=args.prior_dir,
                          manifest_path=manifest_path,
-                         allow_random_split=args.allow_random_patch_split)
+                         allow_random_split=args.allow_random_patch_split,
+                         prior_control=args.prior_control,
+                         control_seed=args.seed)
     val_ds   = CDDataset(args.data_root, split='val',
                          split_ratio=0.85, transform=False,
                          prior_dir_name=args.prior_dir,
                          manifest_path=manifest_path,
-                         allow_random_split=args.allow_random_patch_split)
+                         allow_random_split=args.allow_random_patch_split,
+                         prior_control=args.prior_control,
+                         control_seed=args.seed)
     test_ds = None
-    if not args.allow_random_patch_split:
+    if not args.allow_random_patch_split and not args.skip_test:
         test_ds = CDDataset(args.data_root, split='test',
                             transform=False,
                             prior_dir_name=args.prior_dir,
-                            manifest_path=manifest_path)
+                            manifest_path=manifest_path,
+                            prior_control=args.prior_control,
+                            control_seed=args.seed)
 
     loader_generator = torch.Generator()
     loader_generator.manual_seed(args.seed)
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size,
-        shuffle=True, num_workers=0, pin_memory=True,
+        shuffle=True, num_workers=args.num_workers, pin_memory=True,
         generator=loader_generator)
     val_loader   = DataLoader(
         val_ds, batch_size=args.batch_size,
-        shuffle=False, num_workers=0, pin_memory=True)
+        shuffle=False, num_workers=args.num_workers, pin_memory=True)
     test_loader = None if test_ds is None else DataLoader(
         test_ds, batch_size=args.batch_size,
-        shuffle=False, num_workers=0, pin_memory=True)
+        shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
     # 构建模型 / 优化器 / 调度器
-    model     = build_model(args.model, device)
+    model     = build_model(
+        args.model, device, online_use_gating=not args.no_gating)
     optimizer = build_optimizer(model, args.model, args.lr)
     scheduler = build_scheduler(optimizer, args.model, args.epochs)
     criterion = BCEHybridLoss()
     tracker   = MetricTracker()
+    amp_enabled = bool(args.amp and device.type == 'cuda')
+    scaler = torch.amp.GradScaler('cuda', enabled=amp_enabled)
 
     # CSV 日志
     log_path = os.path.join(save_dir, "training_log.csv")
@@ -361,15 +395,18 @@ def main():
         ])
 
     best_val_f1 = -1.0
+    stale_epochs = 0
+    epochs_completed = 0
 
     for epoch in range(1, args.epochs + 1):
 
         train_loss = train_one_epoch(
             model, args.model, train_loader, criterion, optimizer, device,
-            alpha=args.alpha)
+            alpha=args.alpha, scaler=scaler, amp=amp_enabled)
         metrics    = validate(
             model, args.model, val_loader, device, tracker)
         scheduler.step()
+        epochs_completed = epoch
 
         lr             = scheduler.get_last_lr()[0]
         gamma1, gamma2 = get_gamma(model)
@@ -396,13 +433,19 @@ def main():
 
         if metrics['F1'] > best_val_f1:
             best_val_f1 = metrics['F1']
+            stale_epochs = 0
             torch.save(model.state_dict(),
                        os.path.join(save_dir, "best_model.pth"))
             print(f"          ↑ best saved  (val F1={best_val_f1:.4f})")
+        else:
+            stale_epochs += 1
 
-        if epoch % 20 == 0:
+        if args.save_every > 0 and epoch % args.save_every == 0:
             torch.save(model.state_dict(),
                        os.path.join(save_dir, f"epoch_{epoch}.pth"))
+        if args.patience > 0 and stale_epochs >= args.patience:
+            print(f"          Early stopping after {stale_epochs} stale epochs")
+            break
 
     test_metrics = None
     if test_loader is not None:
@@ -426,6 +469,7 @@ def main():
         'best_val_f1': round(best_val_f1, 6),
         'test_metrics': test_metrics,
         'epochs':     args.epochs,
+        'epochs_completed': epochs_completed,
         'lr':         args.lr,
         'batch_size': args.batch_size,
         'seed':       args.seed,
@@ -438,6 +482,11 @@ def main():
         },
         'prior_tag':  args.prior_tag,
         'alpha':      args.alpha,
+        'prior_control': args.prior_control,
+        'online_use_gating': not args.no_gating,
+        'patience': args.patience,
+        'amp': amp_enabled,
+        'command': ' '.join(os.sys.argv),
     }
     summary_path = os.path.join(save_dir, "summary.json")
     with open(summary_path, 'w') as f:
