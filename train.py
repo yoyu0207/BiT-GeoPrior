@@ -60,6 +60,7 @@ from models.changeformer   import ChangeFormer
 from models.bit_gwr        import BiT_GWR
 from models.bit_gwda       import BiT_GWDA
 from models.bit_online     import BiT_Online
+from models.recent_baselines import RecentChangeDetector
 from losses                import BCEHybridLoss
 from utils                 import MetricTracker
 
@@ -78,6 +79,7 @@ ALL_MODELS = [
     'BiT', 'ChangeFormer',
     'BiT_GWR', 'BiT_GWDA',
     'BiT_Online',
+    'STeInFormer', 'EdgeRefNet',
 ]
 
 
@@ -172,6 +174,8 @@ def build_model(name: str, device, online_use_gating: bool = True) -> torch.nn.M
         'BiT_GWDA':        lambda: BiT_GWDA(**kw),
         'BiT_Online':      lambda: BiT_Online(
                                **kw, use_gating=online_use_gating),
+        'STeInFormer':     lambda: RecentChangeDetector('STeInFormer'),
+        'EdgeRefNet':      lambda: RecentChangeDetector('EdgeRefNet'),
     }
     return mapping[name]().to(device)
 
@@ -271,8 +275,11 @@ def train_one_epoch(model, name, loader, criterion, optimizer, device,
                 out = (model(imgA, imgB, prior) if name in PRIOR_MODELS
                        else model(imgA, imgB))
                 prior_online = None
-            loss = (sum(criterion(o, label) for o in out)
-                    if isinstance(out, list) else criterion(out, label))
+            if hasattr(model, 'compute_training_loss'):
+                loss = model.compute_training_loss(out, label, criterion)
+            else:
+                loss = (sum(criterion(o, label) for o in out)
+                        if isinstance(out, list) else criterion(out, label))
             if use_distil:
                 loss_distil = torch.nn.functional.mse_loss(
                     prior_online, prior)
