@@ -125,6 +125,12 @@ def parse_args():
     parser.add_argument('--no_gating', action='store_true',
                         help="在线先验仍接受 GWDA 软监督，但不注入变化检测特征。")
     parser.add_argument(
+        '--spg_lr', type=float, default=1e-5,
+        help="SPG 先验投影层学习率。仅对 BiT_Online 有效。")
+    parser.add_argument(
+        '--spg_gamma_lr', type=float, default=None,
+        help="SPG 标量 gamma 的学习率；默认与 --spg_lr 相同。")
+    parser.add_argument(
         '--split_manifest', type=str, default=None,
         help="空间 train/val/test 划分清单。默认使用 data_root 下的 "
              "spatial_split_manifest.csv。"
@@ -178,7 +184,8 @@ def _ids(*modules) -> set:
     return {id(p) for m in modules for p in m.parameters()}
 
 
-def build_optimizer(model, name: str, lr: float) -> optim.Optimizer:
+def build_optimizer(model, name: str, lr: float, spg_lr: float = 1e-5,
+                    spg_gamma_lr: float | None = None) -> optim.Optimizer:
 
     # 静态先验模型：仅 SPG 差异化学习率
     if name in ('BiT_GWR', 'BiT_GWDA', 'SNUNet_GeoAware'):
@@ -194,11 +201,20 @@ def build_optimizer(model, name: str, lr: float) -> optim.Optimizer:
     if name == 'BiT_Online':
         excl = _ids(model.prior_encoder, model.spg1, model.spg2)
         base = [p for p in model.parameters() if id(p) not in excl]
+        gamma = [model.spg1.gamma, model.spg2.gamma]
+        gamma_ids = {id(parameter) for parameter in gamma}
+        spg_projection = [
+            parameter
+            for module in (model.spg1, model.spg2)
+            for parameter in module.parameters()
+            if id(parameter) not in gamma_ids
+        ]
+        gamma_lr = spg_lr if spg_gamma_lr is None else spg_gamma_lr
         return optim.AdamW([
             {'params': base,                                    'lr': lr  },
             {'params': list(model.prior_encoder.parameters()),  'lr': 5e-5},
-            {'params': list(model.spg1.parameters()),           'lr': 1e-5},
-            {'params': list(model.spg2.parameters()),           'lr': 1e-5},
+            {'params': spg_projection, 'lr': spg_lr},
+            {'params': gamma, 'lr': gamma_lr, 'weight_decay': 0.0},
         ], weight_decay=1e-3)
 
     # ChangeFormer：原论文建议较大初始 lr
@@ -299,6 +315,53 @@ def get_gamma(model):
     return 0.0, 0.0
 
 
+@torch.no_grad()
+def evaluate_prior_fidelity(model, name, loader, device):
+    """Measure agreement between the online prior and the supplied target."""
+    if name != 'BiT_Online' or loader is None:
+        return None
+    model.eval()
+    count = 0
+    sum_pred = 0.0
+    sum_target = 0.0
+    sum_pred_sq = 0.0
+    sum_target_sq = 0.0
+    sum_cross = 0.0
+    sum_abs_error = 0.0
+    sum_sq_error = 0.0
+    for img_a, img_b, _, prior in loader:
+        img_a = img_a.to(device)
+        img_b = img_b.to(device)
+        target = prior.to(device)
+        predicted = model.prior_encoder(img_a)
+        predicted = predicted.float()
+        target = target.float()
+        count += target.numel()
+        sum_pred += predicted.sum().item()
+        sum_target += target.sum().item()
+        sum_pred_sq += predicted.square().sum().item()
+        sum_target_sq += target.square().sum().item()
+        sum_cross += (predicted * target).sum().item()
+        difference = predicted - target
+        sum_abs_error += difference.abs().sum().item()
+        sum_sq_error += difference.square().sum().item()
+    if count == 0:
+        return None
+    covariance = sum_cross - (sum_pred * sum_target / count)
+    pred_variance = sum_pred_sq - (sum_pred * sum_pred / count)
+    target_variance = sum_target_sq - (sum_target * sum_target / count)
+    denominator = max(pred_variance * target_variance, 0.0) ** 0.5
+    correlation = covariance / denominator if denominator > 0.0 else None
+    return {
+        'mse': sum_sq_error / count,
+        'mae': sum_abs_error / count,
+        'pearson_r': correlation,
+        'predicted_mean': sum_pred / count,
+        'target_mean': sum_target / count,
+        'pixel_count': count,
+    }
+
+
 # ──────────────────────────────────────────────────────────────────────
 #  主流程
 # ──────────────────────────────────────────────────────────────────────
@@ -334,6 +397,8 @@ def main():
     print(f"  Seed       : {args.seed}")
     print(f"  Prior ctrl : {args.prior_control}")
     print(f"  Gating     : {not args.no_gating}")
+    print(f"  SPG LR     : {args.spg_lr:.1e}")
+    print(f"  Gamma LR   : {(args.spg_gamma_lr or args.spg_lr):.1e}")
     print(f"  Split file : {manifest_path or 'legacy random patch split'}")
     print(f"  Save dir   : {save_dir}")
     print("=" * 60)
@@ -378,7 +443,9 @@ def main():
     # 构建模型 / 优化器 / 调度器
     model     = build_model(
         args.model, device, online_use_gating=not args.no_gating)
-    optimizer = build_optimizer(model, args.model, args.lr)
+    optimizer = build_optimizer(
+        model, args.model, args.lr,
+        spg_lr=args.spg_lr, spg_gamma_lr=args.spg_gamma_lr)
     scheduler = build_scheduler(optimizer, args.model, args.epochs)
     criterion = BCEHybridLoss()
     tracker   = MetricTracker()
@@ -447,12 +514,20 @@ def main():
             print(f"          Early stopping after {stale_epochs} stale epochs")
             break
 
+    best_path = os.path.join(save_dir, "best_model.pth")
+    model.load_state_dict(torch.load(
+        best_path, map_location=device, weights_only=True))
+    best_gamma1, best_gamma2 = get_gamma(model)
+    val_prior_fidelity = evaluate_prior_fidelity(
+        model, args.model, val_loader, device)
+
     test_metrics = None
+    test_prior_fidelity = None
     if test_loader is not None:
-        best_path = os.path.join(save_dir, "best_model.pth")
-        model.load_state_dict(torch.load(best_path, map_location=device))
         test_metrics = validate(
             model, args.model, test_loader, device, tracker)
+        test_prior_fidelity = evaluate_prior_fidelity(
+            model, args.model, test_loader, device)
         with open(os.path.join(save_dir, 'test_metrics.json'), 'w') as f:
             json.dump(test_metrics, f, indent=2)
         print(
@@ -484,6 +559,15 @@ def main():
         'alpha':      args.alpha,
         'prior_control': args.prior_control,
         'online_use_gating': not args.no_gating,
+        'spg_lr': args.spg_lr,
+        'spg_gamma_lr': args.spg_gamma_lr or args.spg_lr,
+        'best_checkpoint_gamma': {
+            'spg1': best_gamma1,
+            'spg2': best_gamma2,
+            'max_abs': max(abs(best_gamma1), abs(best_gamma2)),
+        },
+        'val_prior_fidelity': val_prior_fidelity,
+        'test_prior_fidelity': test_prior_fidelity,
         'patience': args.patience,
         'amp': amp_enabled,
         'command': ' '.join(os.sys.argv),

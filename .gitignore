@@ -11,8 +11,10 @@ build/
 checkpoints/
 checkpoints_*/
 /revision_experiments_gwda/
+/spg_optimization_revision/
 /smoke_matrix/
 /smoke_runs/
+/smoke_spg/
 
 # Data & figures
 *.npz
