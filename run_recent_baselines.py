@@ -62,6 +62,7 @@ def command_for(args: argparse.Namespace, model: str, run_name: str,
         "--seed", str(seed),
         "--lr", str(lr),
         "--amp",
+        "--deterministic_warn_only",
         "--prior_dir", "no_prior_for_recent_baselines",
     ]
     if skip_test:

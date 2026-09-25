@@ -94,6 +94,13 @@ def parse_args():
     parser.add_argument('--epochs',     type=int,   default=100)
     parser.add_argument('--batch_size', type=int,   default=8)
     parser.add_argument('--seed',       type=int,   default=42)
+    parser.add_argument(
+        '--deterministic_warn_only', action='store_true',
+        help=(
+            "Keep deterministic seeding, but warn instead of failing when a "
+            "CUDA operator has no deterministic backward implementation."
+        ),
+    )
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--patience', type=int, default=30,
                         help="验证 F1 连续多少轮不提升后提前停止；0 表示禁用。")
@@ -145,13 +152,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def set_global_seed(seed: int) -> None:
+def set_global_seed(seed: int, deterministic_warn_only: bool = False) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    torch.use_deterministic_algorithms(True)
+    torch.use_deterministic_algorithms(
+        True, warn_only=deterministic_warn_only)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -378,7 +386,7 @@ def evaluate_prior_fidelity(model, name, loader, device):
 # ──────────────────────────────────────────────────────────────────────
 def main():
     args   = parse_args()
-    set_global_seed(args.seed)
+    set_global_seed(args.seed, args.deterministic_warn_only)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     manifest_path = args.split_manifest
