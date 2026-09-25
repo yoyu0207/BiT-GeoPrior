@@ -138,11 +138,6 @@ def _adapt_first_conv(module: nn.Module, in_channels: int) -> None:
         padding=original.padding,
         bias=False,
     )
-    with torch.no_grad():
-        mean_weight = original.weight.mean(dim=1, keepdim=True)
-        replacement.weight.copy_(
-            mean_weight.repeat(1, in_channels, 1, 1) * (3.0 / in_channels)
-        )
     module.resnet.conv1 = replacement
 
 
@@ -161,10 +156,6 @@ class SiameseResNet18(nn.Module):
             padding=original.padding,
             bias=False,
         )
-        with torch.no_grad():
-            mean_weight = original.weight.mean(dim=1, keepdim=True)
-            replacement.weight.copy_(
-                mean_weight.repeat(1, in_channels, 1, 1) * (3.0 / in_channels))
         backbone.conv1 = replacement
         self.backbone = backbone
 
