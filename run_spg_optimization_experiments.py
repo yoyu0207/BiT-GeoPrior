@@ -16,6 +16,7 @@ from scipy.stats import ttest_rel, wilcoxon
 SEEDS = [42, 1337, 2025, 3407, 9001]
 PILOT_SEED = 42
 SPG_LR_CANDIDATES = [1e-4, 5e-4, 1e-3]
+ALPHA_CANDIDATES = [0.05, 0.1, 0.2]
 PRIOR_DIR = "spatial_prior_gwda_train_only"
 
 
@@ -102,24 +103,67 @@ def run_pilots(args: argparse.Namespace) -> float:
     return selected["spg_lr"]
 
 
-def key_matrix() -> list[dict]:
+def run_alpha_pilots(args: argparse.Namespace, spg_lr: float) -> float:
+    pilot_rows = []
+    for alpha in ALPHA_CANDIDATES:
+        label = f"{alpha:.2f}".replace(".", "p")
+        run_name = f"alpha_{label}_val_seed{PILOT_SEED}"
+        command = base_command(
+            args, run_name, PILOT_SEED, spg_lr, skip_test=True)
+        command.extend([
+            "--prior_tag", f"alpha_{label}",
+            "--alpha", str(alpha),
+        ])
+        run_dir = args.output_root / run_name
+        run_command(command, run_dir)
+        summary = json.loads(
+            (run_dir / "summary.json").read_text(encoding="utf-8"))
+        pilot_rows.append({
+            "alpha": alpha,
+            "spg_lr": spg_lr,
+            "seed": PILOT_SEED,
+            "best_val_f1": summary["best_val_f1"],
+            "gamma1": summary["best_checkpoint_gamma"]["spg1"],
+            "gamma2": summary["best_checkpoint_gamma"]["spg2"],
+            "max_abs_gamma": summary["best_checkpoint_gamma"]["max_abs"],
+            "val_prior_mse": summary["val_prior_fidelity"]["mse"],
+            "val_prior_pearson_r": summary["val_prior_fidelity"]["pearson_r"],
+            "test_metrics_used": False,
+        })
+    selected = max(pilot_rows, key=lambda row: row["best_val_f1"])
+    payload = {
+        "selection_rule": "highest validation F1; test split was not loaded",
+        "pilot_seed": PILOT_SEED,
+        "selected_spg_lr": spg_lr,
+        "candidates": pilot_rows,
+        "selected_alpha": selected["alpha"],
+    }
+    (args.output_root / "alpha_selection.json").write_text(
+        json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"[selected] alpha={selected['alpha']:.2f}", flush=True)
+    return selected["alpha"]
+
+
+def key_matrix(alpha: float) -> list[dict]:
     return [
         {"name": "OEP_BiT_SPGopt", "prior_tag": "OEP_SPGopt", "alpha": 0.0},
-        {"name": "COAST_SPGopt", "prior_tag": "COAST_SPGopt", "alpha": 0.1},
+        {"name": "COAST_SPGopt", "prior_tag": "COAST_SPGopt", "alpha": alpha},
         {"name": "COAST_shuffled_SPGopt", "prior_tag": "COAST_shuffled_SPGopt",
-         "alpha": 0.1, "prior_control": "shuffled"},
+         "alpha": alpha, "prior_control": "shuffled"},
         {"name": "COAST_random_SPGopt", "prior_tag": "COAST_random_SPGopt",
-         "alpha": 0.1, "prior_control": "random"},
+         "alpha": alpha, "prior_control": "random"},
         {"name": "COAST_no_gating_SPGopt", "prior_tag": "COAST_no_gating_SPGopt",
-         "alpha": 0.1, "no_gating": True},
+         "alpha": alpha, "no_gating": True},
     ]
 
 
-def run_key_matrix(args: argparse.Namespace, spg_lr: float) -> list[dict]:
-    specs = key_matrix()
+def run_key_matrix(args: argparse.Namespace, spg_lr: float,
+                   alpha: float) -> list[dict]:
+    specs = key_matrix(alpha)
     matrix = {
         "seeds": SEEDS,
         "selected_spg_lr": spg_lr,
+        "selected_alpha": alpha,
         "experiments": specs,
     }
     (args.output_root / "experiment_matrix.json").write_text(
@@ -227,7 +271,8 @@ def main() -> None:
     args = parse_args()
     args.output_root.mkdir(parents=True, exist_ok=True)
     selected_lr = run_pilots(args)
-    specs = run_key_matrix(args, selected_lr)
+    selected_alpha = run_alpha_pilots(args, selected_lr)
+    specs = run_key_matrix(args, selected_lr, selected_alpha)
     aggregate(args.output_root, specs)
 
 
