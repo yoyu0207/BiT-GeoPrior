@@ -10,7 +10,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torchvision.models import ResNet18_Weights, resnet18
+from torchvision.models import resnet18
 
 
 DEFAULT_RSCHANGE_ROOT = (
@@ -83,6 +83,8 @@ def _official_edgerefnet(source_root: Path):
     source_text = source_text.replace(
         "if x.shape[1] != 3:", "if x.shape[1] not in (3, 8):")
     source_text = source_text.replace(
+        "pretrained=True,", "pretrained=False,")
+    source_text = source_text.replace(
         "self.SA4 = HFAB(input_channel=256,input_size=32,ratio=0.5)",
         "self.SA4 = HFAB(input_channel=256,input_size=16,ratio=0.5)",
     )
@@ -145,11 +147,11 @@ def _adapt_first_conv(module: nn.Module, in_channels: int) -> None:
 
 
 class SiameseResNet18(nn.Module):
-    """ImageNet-pretrained ResNet-18 adapted deterministically to 8 channels."""
+    """Scratch ResNet-18 adapted to the eight-channel experiment input."""
 
     def __init__(self, in_channels: int = 8):
         super().__init__()
-        backbone = resnet18(weights=ResNet18_Weights.DEFAULT)
+        backbone = resnet18(weights=None)
         original = backbone.conv1
         replacement = nn.Conv2d(
             in_channels,

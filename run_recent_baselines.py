@@ -131,8 +131,8 @@ def run_formal(args: argparse.Namespace,
             },
         },
         "input_adaptation": (
-            "ImageNet ResNet-18 first convolution adapted deterministically "
-            "from three to eight channels"
+            "All recent baselines were initialized from scratch to match "
+            "COAST; first convolutions accept the same eight-channel input"
         ),
         "EdgeRefNet_compatibility_fixes": [
             "remove one accidental leading space before the first import",
