@@ -133,8 +133,18 @@ def parse_args():
              "0.0 = 不使用蒸馏（默认）；建议从 0.1 开始试。"
              "需要同时指定 --prior_dir spatial_prior_gwda。"
     )
-    parser.add_argument('--prior_control', choices=['none', 'shuffled', 'random'],
-                        default='none')
+    parser.add_argument(
+        '--prior_control',
+        choices=[
+            'none', 'shuffled', 'random', 'zero', 'constant',
+            'random_per_epoch',
+        ],
+        default='none',
+        help=(
+            "Distillation-target control. 'constant' uses 0.5 everywhere; "
+            "'random_per_epoch' changes deterministically every epoch."
+        ),
+    )
     parser.add_argument('--no_gating', action='store_true',
                         help="在线先验仍接受 GWDA 软监督，但不注入变化检测特征。")
     parser.add_argument(
@@ -498,6 +508,8 @@ def main():
     epochs_completed = 0
 
     for epoch in range(1, args.epochs + 1):
+
+        train_ds.set_epoch(epoch)
 
         train_loss = train_one_epoch(
             model, args.model, train_loader, criterion, optimizer, device,

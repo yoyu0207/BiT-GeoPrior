@@ -53,10 +53,16 @@ class CDDataset(Dataset):
 
         self.root_dir  = root_dir
         self.transform = transform
-        if prior_control not in {'none', 'shuffled', 'random'}:
-            raise ValueError("prior_control 必须是 none、shuffled 或 random")
+        valid_prior_controls = {
+            'none', 'shuffled', 'random', 'zero', 'constant',
+            'random_per_epoch',
+        }
+        if prior_control not in valid_prior_controls:
+            raise ValueError(
+                f"prior_control 必须是 {sorted(valid_prior_controls)} 之一")
         self.prior_control = prior_control
         self.control_seed = control_seed
+        self.epoch = 0
 
         # 标签文件夹（必须存在）
         self.label_dir = self._find_dir(self._LABEL_DIRS)
@@ -181,6 +187,10 @@ class CDDataset(Dataset):
     def __len__(self) -> int:
         return len(self.file_list)
 
+    def set_epoch(self, epoch: int) -> None:
+        """Set the epoch used by deterministic epoch-varying controls."""
+        self.epoch = int(epoch)
+
     def __getitem__(self, idx: int):
         fname     = self.file_list[idx]
         npy_fname = fname if self.is_npy else fname.replace('.png', '.npy')
@@ -202,9 +212,14 @@ class CDDataset(Dataset):
         ).astype(np.float32)[:8]
 
         # 先验图（文件夹或文件不存在时返回全零）
-        if self.prior_control == 'random':
+        if self.prior_control == 'zero':
+            prior = np.zeros(label.shape[-2:], dtype=np.float32)
+        elif self.prior_control == 'constant':
+            prior = np.full(label.shape[-2:], 0.5, dtype=np.float32)
+        elif self.prior_control in {'random', 'random_per_epoch'}:
+            epoch = self.epoch if self.prior_control == 'random_per_epoch' else 0
             digest = hashlib.blake2b(
-                f"{self.control_seed}:{fname}".encode('utf-8'),
+                f"{self.control_seed}:{epoch}:{fname}".encode('utf-8'),
                 digest_size=8).digest()
             sample_seed = int.from_bytes(digest, 'little')
             prior = np.random.default_rng(sample_seed).random(
