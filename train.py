@@ -106,6 +106,9 @@ def parse_args():
                         help="验证 F1 连续多少轮不提升后提前停止；0 表示禁用。")
     parser.add_argument('--amp', action='store_true',
                         help="在 CUDA 上启用自动混合精度。")
+    parser.add_argument(
+        '--amp_dtype', choices=['float16', 'bfloat16'], default='float16',
+        help="CUDA 自动混合精度的数据类型。")
     parser.add_argument('--output_root', type=str, default='experiments')
     parser.add_argument('--run_name', type=str, default=None)
     parser.add_argument('--save_every', type=int, default=0,
@@ -256,7 +259,8 @@ def build_scheduler(optimizer, name: str, epochs: int):
 #  单 epoch 训练 / 验证
 # ──────────────────────────────────────────────────────────────────────
 def train_one_epoch(model, name, loader, criterion, optimizer, device,
-                    alpha: float = 0.0, scaler=None, amp: bool = False):
+                    alpha: float = 0.0, scaler=None, amp: bool = False,
+                    amp_dtype: torch.dtype = torch.float16):
     """
     alpha > 0 且模型为 BiT_Online 时，启用 GWDA 知识蒸馏：
       L_total = L_cd + alpha * L_distill
@@ -275,7 +279,7 @@ def train_one_epoch(model, name, loader, criterion, optimizer, device,
         prior = prior.to(device)
 
         optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast('cuda', enabled=amp):
+        with torch.amp.autocast('cuda', enabled=amp, dtype=amp_dtype):
             if name == 'BiT_Online' and use_distil:
                 out, prior_online = model(
                     imgA, imgB, prior, return_prior=True)
@@ -292,6 +296,12 @@ def train_one_epoch(model, name, loader, criterion, optimizer, device,
                 loss_distil = torch.nn.functional.mse_loss(
                     prior_online, prior)
                 loss = loss + alpha * loss_distil
+
+        if not torch.isfinite(loss):
+            raise FloatingPointError(
+                f"Non-finite training loss for {name}; "
+                "check mixed precision and model outputs."
+            )
 
         if scaler is not None and scaler.is_enabled():
             scaler.scale(loss).backward()
@@ -469,7 +479,10 @@ def main():
     criterion = BCEHybridLoss()
     tracker   = MetricTracker()
     amp_enabled = bool(args.amp and device.type == 'cuda')
-    scaler = torch.amp.GradScaler('cuda', enabled=amp_enabled)
+    amp_dtype = (torch.bfloat16 if args.amp_dtype == 'bfloat16'
+                 else torch.float16)
+    scaler = torch.amp.GradScaler(
+        'cuda', enabled=amp_enabled and amp_dtype == torch.float16)
 
     # CSV 日志
     log_path = os.path.join(save_dir, "training_log.csv")
@@ -488,7 +501,8 @@ def main():
 
         train_loss = train_one_epoch(
             model, args.model, train_loader, criterion, optimizer, device,
-            alpha=args.alpha, scaler=scaler, amp=amp_enabled)
+            alpha=args.alpha, scaler=scaler, amp=amp_enabled,
+            amp_dtype=amp_dtype)
         metrics    = validate(
             model, args.model, val_loader, device, tracker)
         scheduler.step()
@@ -589,6 +603,7 @@ def main():
         'test_prior_fidelity': test_prior_fidelity,
         'patience': args.patience,
         'amp': amp_enabled,
+        'amp_dtype': args.amp_dtype if amp_enabled else None,
         'command': ' '.join(os.sys.argv),
     }
     summary_path = os.path.join(save_dir, "summary.json")

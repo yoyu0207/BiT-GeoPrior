@@ -61,10 +61,12 @@ def command_for(args: argparse.Namespace, model: str, run_name: str,
         "--batch_size", str(args.batch_size),
         "--seed", str(seed),
         "--lr", str(lr),
-        "--amp",
         "--deterministic_warn_only",
         "--prior_dir", "no_prior_for_recent_baselines",
     ]
+    command.append("--amp")
+    if model == "EdgeRefNet":
+        command.extend(["--amp_dtype", "bfloat16"])
     if skip_test:
         command.append("--skip_test")
     return command
@@ -216,8 +218,9 @@ def aggregate(args: argparse.Namespace) -> None:
                 continue
             significance[model] = {}
             for metric in ("f1", "iou"):
+                summary_key = {"f1": "F1", "iou": "IoU"}[metric]
                 coast_values = np.asarray([
-                    coast[seed]["test_metrics"][metric.upper()]
+                    coast[seed]["test_metrics"][summary_key]
                     for seed in SEEDS
                 ])
                 baseline_values = np.asarray([
