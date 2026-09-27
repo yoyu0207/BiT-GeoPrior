@@ -61,6 +61,7 @@ from models.bit_gwr        import BiT_GWR
 from models.bit_gwda       import BiT_GWDA
 from models.bit_online     import BiT_Online
 from models.recent_baselines import RecentChangeDetector
+from models.official_snunet import OfficialSNUNetCD
 from losses                import BCEHybridLoss
 from utils                 import MetricTracker
 
@@ -79,7 +80,7 @@ ALL_MODELS = [
     'BiT', 'ChangeFormer',
     'BiT_GWR', 'BiT_GWDA',
     'BiT_Online',
-    'STeInFormer', 'EdgeRefNet',
+    'STeInFormer', 'EdgeRefNet', 'SNUNetCDOfficial',
 ]
 
 
@@ -197,6 +198,7 @@ def build_model(name: str, device, online_use_gating: bool = True) -> torch.nn.M
                                **kw, use_gating=online_use_gating),
         'STeInFormer':     lambda: RecentChangeDetector('STeInFormer'),
         'EdgeRefNet':      lambda: RecentChangeDetector('EdgeRefNet'),
+        'SNUNetCDOfficial': lambda: OfficialSNUNetCD(**kw),
     }
     return mapping[name]().to(device)
 

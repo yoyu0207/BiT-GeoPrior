@@ -16,6 +16,10 @@ SOURCES = {
         "repository": "https://github.com/Wafaa-Hima/EdgeRefNet.git",
         "revision": "ba6f872fd077dccb6e53418d9e88c65839b4ded4",
     },
+    "Siam-NestedUNet": {
+        "repository": "https://github.com/likyoo/Siam-NestedUNet.git",
+        "revision": "aed3f1833f3d9d3eccba8c894fd097f358b5329e",
+    },
 }
 
 
