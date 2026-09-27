@@ -73,6 +73,7 @@ PRIOR_MODELS = {
     'BiT_GWR',
     'BiT_GWDA',
     'BiT_Online',
+    'BiT_Online_Boundary',
 }
 
 ONLINE_MODELS = {'BiT_Online', 'BiT_Online_Boundary'}
@@ -152,6 +153,13 @@ def parse_args():
     parser.add_argument('--no_gating', action='store_true',
                         help="在线先验仍接受 GWDA 软监督，但不注入变化检测特征。")
     parser.add_argument(
+        '--prior_only_gating', action='store_true',
+        help=(
+            "直接使用外部空间先验进行 SPG 门控，不使用在线先验进行门控。"
+            "该控制实验应与 --alpha 0 配合使用。"
+        ),
+    )
+    parser.add_argument(
         '--spg_lr', type=float, default=1e-5,
         help="SPG 先验投影层学习率。仅对 BiT_Online 有效。")
     parser.add_argument(
@@ -189,7 +197,8 @@ def set_global_seed(seed: int, deterministic_warn_only: bool = False) -> None:
 # ──────────────────────────────────────────────────────────────────────
 #  模型工厂
 # ──────────────────────────────────────────────────────────────────────
-def build_model(name: str, device, online_use_gating: bool = True) -> torch.nn.Module:
+def build_model(name: str, device, online_use_gating: bool = True,
+                prior_only_gating: bool = False) -> torch.nn.Module:
     kw = dict(in_channels=8, num_classes=1)
     mapping = {
         'SNUNet':          lambda: SNUNet(**kw),
@@ -203,7 +212,8 @@ def build_model(name: str, device, online_use_gating: bool = True) -> torch.nn.M
         'BiT_Online':      lambda: BiT_Online(
                                **kw, use_gating=online_use_gating),
         'BiT_Online_Boundary': lambda: BiTOnlineBoundary(
-                               **kw, use_gating=online_use_gating),
+                               **kw, use_gating=online_use_gating,
+                               prior_only_gating=prior_only_gating),
         'STeInFormer':     lambda: RecentChangeDetector('STeInFormer'),
         'EdgeRefNet':      lambda: RecentChangeDetector('EdgeRefNet'),
         'SNUNetCDOfficial': lambda: OfficialSNUNetCD(**kw),
@@ -381,7 +391,8 @@ def get_gamma(model):
 @torch.no_grad()
 def evaluate_prior_fidelity(model, name, loader, device):
     """Measure agreement between the online prior and the supplied target."""
-    if name not in ONLINE_MODELS or loader is None:
+    if (name not in ONLINE_MODELS or loader is None
+            or getattr(model, 'prior_only_gating', False)):
         return None
     model.eval()
     count = 0
@@ -460,6 +471,7 @@ def main():
     print(f"  Seed       : {args.seed}")
     print(f"  Prior ctrl : {args.prior_control}")
     print(f"  Gating     : {not args.no_gating}")
+    print(f"  Prior-only : {args.prior_only_gating}")
     print(f"  SPG LR     : {args.spg_lr:.1e}")
     print(f"  Gamma LR   : {(args.spg_gamma_lr or args.spg_lr):.1e}")
     print(f"  Split file : {manifest_path or 'legacy random patch split'}")
@@ -504,8 +516,17 @@ def main():
         shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
     # 构建模型 / 优化器 / 调度器
+    if args.no_gating and args.prior_only_gating:
+        raise ValueError("--no_gating and --prior_only_gating are incompatible")
+    if args.prior_only_gating and args.model != 'BiT_Online_Boundary':
+        raise ValueError(
+            "--prior_only_gating is supported only by BiT_Online_Boundary")
+    if args.prior_only_gating and args.alpha != 0.0:
+        raise ValueError("prior-only gating requires --alpha 0")
+
     model     = build_model(
-        args.model, device, online_use_gating=not args.no_gating)
+        args.model, device, online_use_gating=not args.no_gating,
+        prior_only_gating=args.prior_only_gating)
     optimizer = build_optimizer(
         model, args.model, args.lr,
         spg_lr=args.spg_lr, spg_gamma_lr=args.spg_gamma_lr)
@@ -628,6 +649,7 @@ def main():
         'alpha':      args.alpha,
         'prior_control': args.prior_control,
         'online_use_gating': not args.no_gating,
+        'prior_only_gating': args.prior_only_gating,
         'spg_lr': args.spg_lr,
         'spg_gamma_lr': args.spg_gamma_lr or args.spg_lr,
         'boundary_weight': (
