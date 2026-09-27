@@ -23,7 +23,7 @@ COMMON = [
     "--data_root", str(DATA_ROOT),
     "--output_root", str(OUTPUT_ROOT),
     "--epochs", "200",
-    "--patience", "0",
+    "--patience", "60",
     "--batch_size", "8",
     "--amp",
 ]
@@ -74,7 +74,10 @@ def completed_summary(run_dir: Path) -> dict | None:
         summary = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
-    if summary.get("epochs_completed") != 200:
+    epochs_completed = summary.get("epochs_completed")
+    if not isinstance(epochs_completed, int) or not 1 <= epochs_completed <= 200:
+        return None
+    if summary.get("patience") != 60:
         return None
     if not summary.get("test_metrics"):
         return None
