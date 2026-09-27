@@ -32,6 +32,7 @@ DATASET_ROOT = Path(r"D:\yoyu\SA_Identification\dataset_patches_2020_2024")
 RUNS = {
     "FCSiamDiff": ("FCSiamDiff", "revision_experiments_gwda", "FCSiamDiff_seed{seed}"),
     "SiameseNestedUNet_local": ("SNUNet", "revision_experiments_gwda", "SNUNet_seed{seed}"),
+    "SNUNetCDOfficial": ("SNUNetCDOfficial", "official_snunetcd_revision", "SNUNetCDOfficial_seed{seed}"),
     "BiT": ("BiT", "revision_experiments_gwda", "BiT_seed{seed}"),
     "ChangeFormer": ("ChangeFormer", "revision_experiments_gwda", "ChangeFormer_seed{seed}"),
     "STeInFormer": ("STeInFormer", "recent_baseline_revision", "STeInFormer_seed{seed}"),
@@ -465,13 +466,16 @@ def publication_table(aggregates: list[dict], efficiency: dict) -> list[dict]:
             "val_threshold_test_f1_mean": item["val_threshold_f1_mean"],
             "parameters_million": (
                 speed.get("total_parameters", math.nan) / 1e6),
-            "latency_ms": speed.get("fp32_batch1_latency_ms_mean"),
-            "peak_memory_mb": speed.get("peak_allocated_memory_mb"),
+            "latency_ms": speed.get("fp32_batch1_latency_ms_mean", math.nan),
+            "peak_memory_mb": speed.get("peak_allocated_memory_mb", math.nan),
         })
     return rows
 
 
 def summary_markdown(table: list[dict]) -> str:
+    def fmt(value: float | None, digits: int) -> str:
+        return "NA" if value is None or not math.isfinite(value) else f"{value:.{digits}f}"
+
     lines = [
         "# Application-facing metrics",
         "",
@@ -482,12 +486,12 @@ def summary_markdown(table: list[dict]) -> str:
     ]
     for row in table:
         lines.append(
-            f"| {row['model']} | {row['f1_mean']:.4f} +/- {row['f1_sd']:.4f} | "
-            f"{row['pr_auc_mean']:.4f} +/- {row['pr_auc_sd']:.4f} | "
-            f"{row['boundary_f1_mean']:.4f} +/- {row['boundary_f1_sd']:.4f} | "
-            f"{row['patch_area_mae_pp_mean']:.3f} +/- {row['patch_area_mae_pp_sd']:.3f} | "
-            f"{row['brier_mean']:.4f} +/- {row['brier_sd']:.4f} | "
-            f"{row['parameters_million']:.2f} | {row['latency_ms']:.2f} |")
+            f"| {row['model']} | {fmt(row['f1_mean'], 4)} +/- {fmt(row['f1_sd'], 4)} | "
+            f"{fmt(row['pr_auc_mean'], 4)} +/- {fmt(row['pr_auc_sd'], 4)} | "
+            f"{fmt(row['boundary_f1_mean'], 4)} +/- {fmt(row['boundary_f1_sd'], 4)} | "
+            f"{fmt(row['patch_area_mae_pp_mean'], 3)} +/- {fmt(row['patch_area_mae_pp_sd'], 3)} | "
+            f"{fmt(row['brier_mean'], 4)} +/- {fmt(row['brier_sd'], 4)} | "
+            f"{fmt(row['parameters_million'], 2)} | {fmt(row['latency_ms'], 2)} |")
     lines.extend([
         "",
         "Interpretation: boundary F1 measures delineation quality; patch area MAE measures absolute error in changed-area fraction per overlapping test patch; Brier measures probability calibration (lower is better). Patch area values are not unique-area hectares.",
