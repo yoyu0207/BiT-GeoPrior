@@ -60,6 +60,7 @@ from models.changeformer   import ChangeFormer
 from models.bit_gwr        import BiT_GWR
 from models.bit_gwda       import BiT_GWDA
 from models.bit_online     import BiT_Online
+from models.bit_online_boundary import BiTOnlineBoundary
 from models.recent_baselines import RecentChangeDetector
 from models.official_snunet import OfficialSNUNetCD, SNUNetCDLiteNoECAM
 from losses                import BCEHybridLoss
@@ -74,12 +75,14 @@ PRIOR_MODELS = {
     'BiT_Online',
 }
 
+ONLINE_MODELS = {'BiT_Online', 'BiT_Online_Boundary'}
+
 ALL_MODELS = [
     'SNUNet', 'SNUNet_GeoAware',
     'FCSiamDiff',
     'BiT', 'ChangeFormer',
     'BiT_GWR', 'BiT_GWDA',
-    'BiT_Online',
+    'BiT_Online', 'BiT_Online_Boundary',
     'STeInFormer', 'EdgeRefNet', 'SNUNetCDOfficial', 'SNUNetCDLiteNoECAM',
 ]
 
@@ -155,6 +158,9 @@ def parse_args():
         '--spg_gamma_lr', type=float, default=None,
         help="SPG 标量 gamma 的学习率；默认与 --spg_lr 相同。")
     parser.add_argument(
+        '--boundary_weight', type=float, default=0.2,
+        help="Boundary auxiliary loss weight for BiT_Online_Boundary.")
+    parser.add_argument(
         '--split_manifest', type=str, default=None,
         help="空间 train/val/test 划分清单。默认使用 data_root 下的 "
              "spatial_split_manifest.csv。"
@@ -196,6 +202,8 @@ def build_model(name: str, device, online_use_gating: bool = True) -> torch.nn.M
         'BiT_GWDA':        lambda: BiT_GWDA(**kw),
         'BiT_Online':      lambda: BiT_Online(
                                **kw, use_gating=online_use_gating),
+        'BiT_Online_Boundary': lambda: BiTOnlineBoundary(
+                               **kw, use_gating=online_use_gating),
         'STeInFormer':     lambda: RecentChangeDetector('STeInFormer'),
         'EdgeRefNet':      lambda: RecentChangeDetector('EdgeRefNet'),
         'SNUNetCDOfficial': lambda: OfficialSNUNetCD(**kw),
@@ -230,7 +238,7 @@ def build_optimizer(model, name: str, lr: float, spg_lr: float = 1e-5,
         ], weight_decay=1e-3)
 
     # 在线先验模型：prior_encoder + SPG 差异化学习率
-    if name == 'BiT_Online':
+    if name in ONLINE_MODELS:
         excl = _ids(model.prior_encoder, model.spg1, model.spg2)
         base = [p for p in model.parameters() if id(p) not in excl]
         gamma = [model.spg1.gamma, model.spg2.gamma]
@@ -273,7 +281,8 @@ def build_scheduler(optimizer, name: str, epochs: int):
 # ──────────────────────────────────────────────────────────────────────
 def train_one_epoch(model, name, loader, criterion, optimizer, device,
                     alpha: float = 0.0, scaler=None, amp: bool = False,
-                    amp_dtype: torch.dtype = torch.float16):
+                    amp_dtype: torch.dtype = torch.float16,
+                    boundary_weight: float = 0.0):
     """
     alpha > 0 且模型为 BiT_Online 时，启用 GWDA 知识蒸馏：
       L_total = L_cd + alpha * L_distill
@@ -282,7 +291,7 @@ def train_one_epoch(model, name, loader, criterion, optimizer, device,
     """
     model.train()
     total      = 0.0
-    use_distil = (alpha > 0.0 and name == 'BiT_Online')
+    use_distil = (alpha > 0.0 and name in ONLINE_MODELS)
     bar        = tqdm(loader, desc="Train", leave=False)
 
     for imgA, imgB, label, prior in bar:
@@ -293,9 +302,13 @@ def train_one_epoch(model, name, loader, criterion, optimizer, device,
 
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast('cuda', enabled=amp, dtype=amp_dtype):
-            if name == 'BiT_Online' and use_distil:
-                out, prior_online = model(
+            boundary_logits = None
+            if name in ONLINE_MODELS:
+                online_output = model(
                     imgA, imgB, prior, return_prior=True)
+                out, prior_online = online_output[:2]
+                if len(online_output) > 2:
+                    boundary_logits = online_output[2]
             else:
                 out = (model(imgA, imgB, prior) if name in PRIOR_MODELS
                        else model(imgA, imgB))
@@ -309,6 +322,14 @@ def train_one_epoch(model, name, loader, criterion, optimizer, device,
                 loss_distil = torch.nn.functional.mse_loss(
                     prior_online, prior)
                 loss = loss + alpha * loss_distil
+            if boundary_logits is not None and boundary_weight > 0.0:
+                dilated = torch.nn.functional.max_pool2d(
+                    label, kernel_size=3, stride=1, padding=1)
+                eroded = -torch.nn.functional.max_pool2d(
+                    -label, kernel_size=3, stride=1, padding=1)
+                boundary_target = ((dilated - eroded) > 0).to(label.dtype)
+                loss = loss + boundary_weight * criterion(
+                    boundary_logits, boundary_target)
 
         if not torch.isfinite(loss):
             raise FloatingPointError(
@@ -360,7 +381,7 @@ def get_gamma(model):
 @torch.no_grad()
 def evaluate_prior_fidelity(model, name, loader, device):
     """Measure agreement between the online prior and the supplied target."""
-    if name != 'BiT_Online' or loader is None:
+    if name not in ONLINE_MODELS or loader is None:
         return None
     model.eval()
     count = 0
@@ -517,7 +538,7 @@ def main():
         train_loss = train_one_epoch(
             model, args.model, train_loader, criterion, optimizer, device,
             alpha=args.alpha, scaler=scaler, amp=amp_enabled,
-            amp_dtype=amp_dtype)
+            amp_dtype=amp_dtype, boundary_weight=args.boundary_weight)
         metrics    = validate(
             model, args.model, val_loader, device, tracker)
         scheduler.step()
@@ -609,6 +630,8 @@ def main():
         'online_use_gating': not args.no_gating,
         'spg_lr': args.spg_lr,
         'spg_gamma_lr': args.spg_gamma_lr or args.spg_lr,
+        'boundary_weight': (
+            args.boundary_weight if args.model == 'BiT_Online_Boundary' else 0.0),
         'best_checkpoint_gamma': {
             'spg1': best_gamma1,
             'spg2': best_gamma2,
