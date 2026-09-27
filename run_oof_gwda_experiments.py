@@ -46,6 +46,8 @@ def command_for(
     *,
     alpha: float | None = None,
     skip_test: bool = False,
+    prior_control: str | None = None,
+    no_gating: bool = False,
 ) -> list[str]:
     command = [
         str(args.python),
@@ -85,6 +87,10 @@ def command_for(
         ])
     if skip_test:
         command.append("--skip_test")
+    if prior_control:
+        command.extend(["--prior_control", prior_control])
+    if no_gating:
+        command.append("--no_gating")
     return command
 
 
